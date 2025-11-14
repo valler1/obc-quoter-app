@@ -13,6 +13,7 @@ const emptyQuote = {
   package_description: '',
   weight_kg: '',
   traveler: 'you',
+  travel_class: 'ANY', // NEW: ANY / ECONOMY / PREMIUM_ECONOMY / BUSINESS / FIRST
   status: 'draft',
   flight_cost_total: 0,
   ground_cost_total: 0,
@@ -70,12 +71,20 @@ function App() {
     setLoadingFlights(true);
     try {
       const departureDate = quote.pickup_time.slice(0, 10);
-      const res = await searchFlights({
+
+      const payload = {
         originLocationCode: quote.origin_city.toUpperCase(),
         destinationLocationCode: quote.destination_city.toUpperCase(),
         departureDate,
         adults: 1,
-      });
+      };
+
+      // If user selected a specific travel class, send it to backend
+      if (quote.travel_class && quote.travel_class !== 'ANY') {
+        payload.travelClass = quote.travel_class;
+      }
+
+      const res = await searchFlights(payload);
       setFlightOffers(res.offers || []);
     } catch (e) {
       console.error(e);
@@ -327,6 +336,21 @@ function App() {
       {step === 2 && (
         <div>
           <h2>Step 2 – Flights & routing</h2>
+
+          <div style={{ marginBottom: '10px' }}>
+            <label style={{ marginRight: '10px' }}>Preferred travel class: </label>
+            <select
+              value={quote.travel_class}
+              onChange={(e) => updateQuoteField('travel_class', e.target.value)}
+            >
+              <option value="ANY">Any / cheapest</option>
+              <option value="ECONOMY">Economy</option>
+              <option value="PREMIUM_ECONOMY">Premium Economy</option>
+              <option value="BUSINESS">Business</option>
+              <option value="FIRST">First</option>
+            </select>
+          </div>
+
           <div style={{ marginBottom: '10px' }}>
             <button onClick={handleSearchFlights} disabled={loadingFlights}>
               {loadingFlights ? 'Searching…' : 'Search flights'}
@@ -444,7 +468,7 @@ function App() {
           <button onClick={() => addCostItem('ground')}>+ Add ground cost line</button>
           {costItems
             .filter((i) => i.category === 'ground')
-            .map((item, idx) => {
+            .map((item) => {
               const index = costItems.indexOf(item);
               return (
                 <div key={index} style={{ border: '1px solid #ccc', padding: '5px', marginTop: '5px' }}>
@@ -479,7 +503,7 @@ function App() {
           <button onClick={() => addCostItem('other')}>+ Add other cost line</button>
           {costItems
             .filter((i) => i.category === 'other')
-            .map((item, idx) => {
+            .map((item) => {
               const index = costItems.indexOf(item);
               return (
                 <div key={index} style={{ border: '1px solid #ccc', padding: '5px', marginTop: '5px' }}>
