@@ -17,6 +17,7 @@ router.post('/search', async (req, res) => {
       departureDate,
       returnDate,
       adults = 1,
+      travelClass, // ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST
     } = req.body;
 
     const params = {
@@ -30,6 +31,11 @@ router.post('/search', async (req, res) => {
 
     if (returnDate) {
       params.returnDate = returnDate;
+    }
+
+    // Only set travelClass if the frontend sent it (and not "ANY")
+    if (travelClass) {
+      params.travelClass = travelClass;
     }
 
     const response = await amadeus.shopping.flightOffersSearch.get(params);
@@ -50,7 +56,7 @@ router.post('/search', async (req, res) => {
         id: offer.id,
         totalPrice: offer.price.total,
         currency: offer.price.currency,
-        cabin, // Travel class (Economy / Business / etc.)
+        cabin, // Travel class (ECONOMY / BUSINESS / etc.)
         itineraries: offer.itineraries.map((it) => ({
           duration: it.duration,
           segments: it.segments.map((seg) => ({
