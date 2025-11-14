@@ -10,19 +10,21 @@ const emptyQuote = {
   destination_city: '',
   pickup_time: '',
   delivery_deadline: '',
-  return_date: '', // NEW: optional return date for the courier
+  return_date: '', // optional return date for the courier
   package_description: '',
   weight_kg: '',
   traveler: 'you',
   travel_class: 'ANY', // ANY / ECONOMY / PREMIUM_ECONOMY / BUSINESS / FIRST
+  nights_at_destination: 0, // auto from RT flight
+  days_out_total: 0, // auto from RT flight (for meals / per diem)
   status: 'draft',
   flight_cost_total: 0,
   ground_cost_total: 0,
   time_cost_total: 0,
   other_cost_total: 0,
   total_cost: 0,
-  margin_type: 'percent',
-  margin_value: 30,
+  margin_type: 'percent', // 'percent' | 'fixed'
+  margin_value: 30,       // either % or € depending on type
   margin_amount: 0,
   price_to_customer: 0,
   currency: 'EUR',
@@ -62,6 +64,38 @@ function App() {
     setView('new');
   }
 
+  // --- helper: compute totals & margin from current costs + quote ---
+  function computeTotals(items, q) {
+    const flightCost = Number(q.flight_cost_total || 0);
+    const timeCost = Number(q.time_cost_total || 0);
+
+    const ground = items
+      .filter((i) => i.category === 'ground')
+      .reduce((sum, i) => sum + Number(i.line_total || 0), 0);
+
+    // everything that is NOT ground is treated as "other" (hotel, meals, per diem, other misc)
+    const other = items
+      .filter((i) => i.category !== 'ground')
+      .reduce((sum, i) => sum + Number(i.line_total || 0), 0);
+
+    const totalCost = flightCost + timeCost + ground + other;
+
+    let price = totalCost;
+    let marginAmount = 0;
+    const marginType = q.margin_type || 'percent';
+    const marginVal = Number(q.margin_value || 0);
+
+    if (marginType === 'percent') {
+      price = totalCost * (1 + marginVal / 100);
+      marginAmount = price - totalCost;
+    } else {
+      marginAmount = marginVal;
+      price = totalCost + marginAmount;
+    }
+
+    return { ground, other, totalCost, marginAmount, price };
+  }
+
   // ---- Step 2: flights ----
   async function handleSearchFlights() {
     setError('');
@@ -80,12 +114,12 @@ function App() {
         adults: 1,
       };
 
-      // If a return date is provided, use it for the courier’s return flight
+      // optional courier return
       if (quote.return_date) {
         payload.returnDate = quote.return_date.slice(0, 10);
       }
 
-      // If user selected a specific travel class, send it to backend
+      // travel class filter
       if (quote.travel_class && quote.travel_class !== 'ANY') {
         payload.travelClass = quote.travel_class;
       }
@@ -103,41 +137,71 @@ function App() {
   function useOffer(offer) {
     setSelectedOffer(offer);
     const flightCost = Number(offer.totalPrice || 0);
-    setQuote((q) => ({ ...q, flight_cost_total: flightCost }));
+
+    // --- auto-calc nights at destination for RTs AND total days out ---
+    let nights = 0;
+    let daysOut = 1; // at least 1 day out
+
+    try {
+      if (offer.itineraries && offer.itineraries.length > 1) {
+        const outbound = offer.itineraries[0];
+        const inbound = offer.itineraries[offer.itineraries.length - 1];
+
+        if (outbound.segments && outbound.segments.length && inbound.segments && inbound.segments.length) {
+          const firstOutboundSeg = outbound.segments[0];
+          const lastOutboundSeg = outbound.segments[outbound.segments.length - 1];
+          const lastInboundSeg = inbound.segments[inbound.segments.length - 1];
+
+          const departHome = new Date(firstOutboundSeg.departure);
+          const arriveDest = new Date(lastOutboundSeg.arrival);
+          const arriveHome = new Date(lastInboundSeg.arrival);
+
+          // Nights at destination: difference in calendar days between arrival and return departure
+          const toDateOnly = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+          const dArriveDest = toDateOnly(arriveDest);
+          const dArriveHome = toDateOnly(arriveHome);
+
+          const diffMsNights = dArriveHome.getTime() - dArriveDest.getTime();
+          if (diffMsNights > 0) {
+            nights = Math.round(diffMsNights / (1000 * 60 * 60 * 24));
+            if (nights < 0) nights = 0;
+          }
+
+          // Days out total: from departure at home to arrival back home, rounded up
+          const diffMsDays = arriveHome.getTime() - departHome.getTime();
+          if (diffMsDays > 0) {
+            const diffHours = diffMsDays / (1000 * 60 * 60);
+            daysOut = Math.ceil(diffHours / 24); // round up prorata
+            if (daysOut < 1) daysOut = 1;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Error computing nights/days_out_total', e);
+      nights = 0;
+      daysOut = 1;
+    }
+
+    setQuote((q) => {
+      const updated = {
+        ...q,
+        flight_cost_total: flightCost,
+        nights_at_destination: nights,
+        days_out_total: daysOut,
+      };
+      const totals = computeTotals(costItems, updated);
+      return {
+        ...updated,
+        ground_cost_total: totals.ground,
+        other_cost_total: totals.other,
+        total_cost: totals.totalCost,
+        margin_amount: totals.marginAmount,
+        price_to_customer: totals.price,
+      };
+    });
   }
 
   // ---- Step 3: costs & margin ----
-  function recalcTotals(items) {
-    const ground = items
-      .filter((i) => i.category === 'ground')
-      .reduce((sum, i) => sum + Number(i.line_total || 0), 0);
-    const other = items
-      .filter((i) => i.category === 'other')
-      .reduce((sum, i) => sum + Number(i.line_total || 0), 0);
-    const timeCost = Number(quote.time_cost_total || 0);
-    const flightCost = Number(quote.flight_cost_total || 0);
-    const totalCost = flightCost + ground + timeCost + other;
-
-    let price = totalCost;
-    let marginAmount = 0;
-
-    if (quote.margin_type === 'percent') {
-      price = totalCost * (1 + Number(quote.margin_value || 0) / 100);
-      marginAmount = price - totalCost;
-    } else {
-      marginAmount = Number(quote.margin_value || 0);
-      price = totalCost + marginAmount;
-    }
-
-    setQuote((q) => ({
-      ...q,
-      ground_cost_total: ground,
-      other_cost_total: other,
-      total_cost: totalCost,
-      margin_amount: marginAmount,
-      price_to_customer: price,
-    }));
-  }
 
   function updateCostItem(index, field, value) {
     setCostItems((prev) => {
@@ -146,33 +210,69 @@ function App() {
       const qty = Number(copy[index].quantity || 0);
       const unitPrice = Number(copy[index].unit_price || 0);
       copy[index].line_total = qty * unitPrice;
-      recalcTotals(copy);
+
+      const totals = computeTotals(copy, quote);
+      setQuote((prevQuote) => ({
+        ...prevQuote,
+        ground_cost_total: totals.ground,
+        other_cost_total: totals.other,
+        total_cost: totals.totalCost,
+        margin_amount: totals.marginAmount,
+        price_to_customer: totals.price,
+      }));
+
       return copy;
     });
   }
 
-  function addCostItem(category) {
-    setCostItems((prev) => [
-      ...prev,
-      {
+  function addCostItem(category, defaults = {}) {
+    setCostItems((prev) => {
+      const baseItem = {
         description: '',
         quantity: 1,
-        unit: '',
+        unit: '', // kept for backend compatibility, not shown in UI
         unit_price: 0,
         line_total: 0,
         category,
-      },
-    ]);
+      };
+      const item = { ...baseItem, ...defaults };
+      const newItems = [...prev, item];
+
+      const totals = computeTotals(newItems, quote);
+      setQuote((prevQuote) => ({
+        ...prevQuote,
+        ground_cost_total: totals.ground,
+        other_cost_total: totals.other,
+        total_cost: totals.totalCost,
+        margin_amount: totals.marginAmount,
+        price_to_customer: totals.price,
+      }));
+
+      return newItems;
+    });
   }
 
   function updateQuoteField(field, value) {
     setQuote((prev) => {
       const updated = { ...prev, [field]: value };
+
+      // if margin or flight/time costs change, recompute totals
+      if (
+        field === 'margin_type' ||
+        field === 'margin_value' ||
+        field === 'flight_cost_total' ||
+        field === 'time_cost_total'
+      ) {
+        const totals = computeTotals(costItems, updated);
+        updated.ground_cost_total = totals.ground;
+        updated.other_cost_total = totals.other;
+        updated.total_cost = totals.totalCost;
+        updated.margin_amount = totals.marginAmount;
+        updated.price_to_customer = totals.price;
+      }
+
       return updated;
     });
-    if (field === 'margin_type' || field === 'margin_value') {
-      recalcTotals(costItems);
-    }
   }
 
   // ---- Save quote ----
@@ -256,6 +356,7 @@ function App() {
       <div style={{ marginBottom: '10px' }}>Step {step} of 4</div>
       {error && <div style={{ color: 'red' }}>{error}</div>}
 
+      {/* STEP 1 */}
       {step === 1 && (
         <div>
           <h2>Step 1 – Request details</h2>
@@ -345,6 +446,7 @@ function App() {
         </div>
       )}
 
+      {/* STEP 2 */}
       {step === 2 && (
         <div>
           <h2>Step 2 – Flights & routing</h2>
@@ -460,6 +562,7 @@ function App() {
         </div>
       )}
 
+      {/* STEP 3 */}
       {step === 3 && (
         <div>
           <h2>Step 3 – Costs & margin</h2>
@@ -471,10 +574,19 @@ function App() {
             value={quote.flight_cost_total}
             onChange={(e) => {
               const val = Number(e.target.value || 0);
-              setQuote((q) => ({ ...q, flight_cost_total: val }));
-              recalcTotals(costItems);
+              updateQuoteField('flight_cost_total', val);
             }}
           />
+
+          <h3>Overnights & days out</h3>
+          <p>
+            Nights at destination (auto from RT flight):{' '}
+            <strong>{quote.nights_at_destination}</strong>
+          </p>
+          <p>
+            Days out for meals/per diem (auto, rounded up):{' '}
+            <strong>{quote.days_out_total}</strong>
+          </p>
 
           <h3>Ground transport</h3>
           <button onClick={() => addCostItem('ground')}>+ Add ground cost line</button>
@@ -496,13 +608,125 @@ function App() {
                     onChange={(e) => updateCostItem(index, 'quantity', e.target.value)}
                   />
                   <input
-                    placeholder="Unit"
-                    value={item.unit}
-                    onChange={(e) => updateCostItem(index, 'unit', e.target.value)}
+                    type="number"
+                    placeholder="Unit price"
+                    value={item.unit_price}
+                    onChange={(e) => updateCostItem(index, 'unit_price', e.target.value)}
+                  />
+                  <span> Line total: {item.line_total}</span>
+                </div>
+              );
+            })}
+
+          <h3>Hotel</h3>
+          <button
+            onClick={() =>
+              addCostItem('hotel', {
+                description: 'Hotel nights',
+                quantity: quote.nights_at_destination || 0,
+              })
+            }
+          >
+            + Add hotel cost line (prefill nights)
+          </button>
+          {costItems
+            .filter((i) => i.category === 'hotel')
+            .map((item) => {
+              const index = costItems.indexOf(item);
+              return (
+                <div key={index} style={{ border: '1px solid #ccc', padding: '5px', marginTop: '5px' }}>
+                  <input
+                    placeholder="Description"
+                    value={item.description}
+                    onChange={(e) => updateCostItem(index, 'description', e.target.value)}
                   />
                   <input
                     type="number"
-                    placeholder="Unit price"
+                    placeholder="Nights"
+                    value={item.quantity}
+                    onChange={(e) => updateCostItem(index, 'quantity', e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    placeholder="Price per night"
+                    value={item.unit_price}
+                    onChange={(e) => updateCostItem(index, 'unit_price', e.target.value)}
+                  />
+                  <span> Line total: {item.line_total}</span>
+                </div>
+              );
+            })}
+
+          <h3>Meals</h3>
+          <button
+            onClick={() =>
+              addCostItem('meals', {
+                description: 'Meals (2 per day)',
+                quantity: (quote.days_out_total || 0) * 2,
+              })
+            }
+          >
+            + Add meals cost line (prefill 2/day)
+          </button>
+          {costItems
+            .filter((i) => i.category === 'meals')
+            .map((item) => {
+              const index = costItems.indexOf(item);
+              return (
+                <div key={index} style={{ border: '1px solid #ccc', padding: '5px', marginTop: '5px' }}>
+                  <input
+                    placeholder="Description"
+                    value={item.description}
+                    onChange={(e) => updateCostItem(index, 'description', e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    placeholder="Number of meals"
+                    value={item.quantity}
+                    onChange={(e) => updateCostItem(index, 'quantity', e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    placeholder="Price per meal"
+                    value={item.unit_price}
+                    onChange={(e) => updateCostItem(index, 'unit_price', e.target.value)}
+                  />
+                  <span> Line total: {item.line_total}</span>
+                </div>
+              );
+            })}
+
+          <h3>Per diem</h3>
+          <button
+            onClick={() =>
+              addCostItem('per_diem', {
+                description: 'Per diem',
+                quantity: quote.days_out_total || 0,
+              })
+            }
+          >
+            + Add per diem cost line (prefill days)
+          </button>
+          {costItems
+            .filter((i) => i.category === 'per_diem')
+            .map((item) => {
+              const index = costItems.indexOf(item);
+              return (
+                <div key={index} style={{ border: '1px solid #ccc', padding: '5px', marginTop: '5px' }}>
+                  <input
+                    placeholder="Description"
+                    value={item.description}
+                    onChange={(e) => updateCostItem(index, 'description', e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    placeholder="Days"
+                    value={item.quantity}
+                    onChange={(e) => updateCostItem(index, 'quantity', e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    placeholder="Per diem per day"
                     value={item.unit_price}
                     onChange={(e) => updateCostItem(index, 'unit_price', e.target.value)}
                   />
@@ -531,11 +755,6 @@ function App() {
                     onChange={(e) => updateCostItem(index, 'quantity', e.target.value)}
                   />
                   <input
-                    placeholder="Unit"
-                    value={item.unit}
-                    onChange={(e) => updateCostItem(index, 'unit', e.target.value)}
-                  />
-                  <input
                     type="number"
                     placeholder="Unit price"
                     value={item.unit_price}
@@ -562,7 +781,9 @@ function App() {
             <input
               type="number"
               value={quote.margin_value}
-              onChange={(e) => updateQuoteField('margin_value', e.target.value)}
+              onChange={(e) =>
+                updateQuoteField('margin_value', Number(e.target.value || 0))
+              }
             />
           </div>
 
@@ -583,6 +804,7 @@ function App() {
         </div>
       )}
 
+      {/* STEP 4 */}
       {step === 4 && (
         <div>
           <h2>Step 4 – Preview</h2>
@@ -600,6 +822,8 @@ function App() {
             </p>
             {quote.return_date && <p>Courier return date: {quote.return_date}</p>}
             <p>Package: {quote.package_description}</p>
+            <p>Nights at destination: {quote.nights_at_destination}</p>
+            <p>Days out (for meals / per diem): {quote.days_out_total}</p>
             <p>
               Total all-inclusive price:{' '}
               <strong>
