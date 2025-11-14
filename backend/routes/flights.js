@@ -8,6 +8,7 @@ const amadeus = new Amadeus({
   clientSecret: process.env.AMADEUS_CLIENT_SECRET,
 });
 
+// POST /api/flights/search
 router.post('/search', async (req, res) => {
   try {
     const {
@@ -15,7 +16,7 @@ router.post('/search', async (req, res) => {
       destinationLocationCode,
       departureDate,
       returnDate,
-      adults = 1
+      adults = 1,
     } = req.body;
 
     const params = {
@@ -24,7 +25,7 @@ router.post('/search', async (req, res) => {
       departureDate,
       adults,
       currencyCode: 'EUR',
-      max: 10
+      max: 10,
     };
 
     if (returnDate) {
@@ -33,33 +34,42 @@ router.post('/search', async (req, res) => {
 
     const response = await amadeus.shopping.flightOffersSearch.get(params);
 
-    const offers = response.data.map(offer => {
-  // Try to get cabin (Economy / Business / etc.) from the first traveler pricing
-  let cabin = null;
-  if (
-    offer.travelerPricings &&
-    offer.travelerPricings[0] &&
-    offer.travelerPricings[0].fareDetailsBySegment &&
-    offer.travelerPricings[0].fareDetailsBySegment[0]
-  ) {
-    cabin = offer.travelerPricings[0].fareDetailsBySegment[0].cabin || null;
-  }
+    const offers = response.data.map((offer) => {
+      // Try to get cabin (Economy / Business / etc.) from the first traveler pricing
+      let cabin = null;
+      if (
+        offer.travelerPricings &&
+        offer.travelerPricings[0] &&
+        offer.travelerPricings[0].fareDetailsBySegment &&
+        offer.travelerPricings[0].fareDetailsBySegment[0]
+      ) {
+        cabin = offer.travelerPricings[0].fareDetailsBySegment[0].cabin || null;
+      }
 
-  return {
-    id: offer.id,
-    totalPrice: offer.price.total,
-    currency: offer.price.currency,
-    cabin, // Travel class (Economy / Business / etc.)
-    itineraries: offer.itineraries.map(it => ({
-      duration: it.duration,
-      segments: it.segments.map(seg => ({
-        from: seg.departure.iataCode,
-        to: seg.arrival.at ? seg.arrival.iataCode : seg.arrival.iataCode,
-        departure: seg.departure.at,
-        arrival: seg.arrival.at,
-        carrierCode: seg.carrierCode,
-        flightNumber: seg.number
-      }))
-    }))
-  };
+      return {
+        id: offer.id,
+        totalPrice: offer.price.total,
+        currency: offer.price.currency,
+        cabin, // Travel class (Economy / Business / etc.)
+        itineraries: offer.itineraries.map((it) => ({
+          duration: it.duration,
+          segments: it.segments.map((seg) => ({
+            from: seg.departure.iataCode,
+            to: seg.arrival.iataCode,
+            departure: seg.departure.at,
+            arrival: seg.arrival.at,
+            carrierCode: seg.carrierCode,
+            flightNumber: seg.number,
+          })),
+        })),
+      };
+    });
+
+    res.json({ offers });
+  } catch (err) {
+    console.error('Flight search error:', err);
+    res.status(500).json({ error: 'Flight search failed' });
+  }
 });
+
+module.exports = router;
